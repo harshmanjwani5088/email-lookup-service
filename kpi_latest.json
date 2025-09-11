@@ -1,0 +1,57 @@
+{
+  "run_seconds": 662.14,
+  "users_discovered": 414,
+  "users_with_hits": 37,
+  "hit_rate_percent": 8.94,
+  "new_emails_written": 200,
+  "emails_by_source": {
+    "huggingface-profile": 3,
+    "huggingface-model": 0,
+    "website": 75,
+    "github": 122
+  },
+  "unique_domains": 82,
+  "top_domains": [
+    [
+      "gmail.com",
+      71
+    ],
+    [
+      "2x.jpg",
+      21
+    ],
+    [
+      "stability.ai",
+      7
+    ],
+    [
+      "allenai.org",
+      6
+    ],
+    [
+      "2x.png",
+      6
+    ],
+    [
+      "hotmail.com",
+      5
+    ],
+    [
+      "ultravox.ai",
+      4
+    ],
+    [
+      "3x.png",
+      4
+    ],
+    [
+      "huggingface.co",
+      2
+    ],
+    [
+      "medium.com",
+      2
+    ]
+  ],
+  "out_path": "/home/harsh/Downloads/trial-11sep-email-lookup-service/emails.jsonl"
+}
