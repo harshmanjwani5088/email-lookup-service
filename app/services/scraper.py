@@ -1,5 +1,4 @@
-
-import os, time, random, threading
+import os, time, random, threading, json
 from typing import List, Tuple, Dict
 from bs4 import BeautifulSoup
 import requests
@@ -17,6 +16,23 @@ from app.models.schema import ScrapeParams
 _lock = threading.Lock()
 _last_kpi: Dict[str, object] = {}
 _running = False
+_PER_USER_MAX = int(os.getenv("PER_USER_MAX", "1"))  # 1 = default single row per username; 0 = unlimited
+
+def _load_existing_pairs(path: str) -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    if not os.path.exists(path):
+        return pairs
+    with open(path, "r", encoding="utf-8") as f:
+        for ln in f:
+            try:
+                r = json.loads(ln)
+                u = str(r.get("username", "")).strip()
+                e = str(r.get("email", "")).strip().lower()
+                if u and e:
+                    pairs.add((u, e))
+            except Exception:
+                continue
+    return pairs
 
 def scrape_hf_users(pages: int) -> List[str]:
     users: List[str] = []
@@ -60,7 +76,6 @@ def scrape_hf_profile(user: str) -> Tuple[list[str], list[str], list[str]]:
             gh_links.append(href.split("?")[0].split("#")[0].rstrip("/"))
         if href.startswith("http") and "huggingface.co" not in href:
             web_links.append(href.split("?")[0].split("#")[0].rstrip("/"))
-    # uniq
     gh_links = list(dict.fromkeys(gh_links))
     web_links = list(dict.fromkeys(web_links))
     return emails, gh_links, web_links
@@ -76,7 +91,7 @@ def get_user_models(user: str, pages: int) -> list[str]:
         for a in soup.select(f"a[href^='/{user}/']"):
             href = a.get("href", "").split("?")[0].split("#")[0].rstrip("/")
             parts = href.strip("/").split("/")
-            if len(parts) == 2 and href not in slugs:  # /user/model
+            if len(parts) == 2 and href not in slugs:
                 slugs.append(href)
         time.sleep(0.1)
     return slugs
@@ -88,8 +103,7 @@ def scrape_hf_model_page(slug: str) -> Tuple[list[str], list[str]]:
         return [], []
     text = resp.text
     emails = extract_emails(text)
-    soup = BeautifulSoup(resp.text, "htmlparser")
-    soup = BeautifulSoup(resp.text, "html.parser")  # fix parser typo
+    soup = BeautifulSoup(resp.text, "html.parser")
     gh_links = [a["href"].split("?")[0].split("#")[0].rstrip("/")
                 for a in soup.find_all("a", href=True)
                 if "github.com" in a["href"].lower()]
@@ -134,7 +148,6 @@ def get_github_emails(user_or_url: str) -> list[str]:
                 if isinstance(ref, str):
                     emails.append(ref)
         time.sleep(0.1)
-    # reuse extraction (filters noreply + dedup)
     return extract_emails("\n".join(emails))
 
 def run_scrape(params: ScrapeParams) -> dict:
@@ -145,7 +158,10 @@ def run_scrape(params: ScrapeParams) -> dict:
     _running = True
     try:
         users = scrape_hf_users(params.hf_listing_pages)
-        seen_emails = load_existing_emails(OUT_PATH)
+
+        # cross-run de-dup
+        seen_emails = load_existing_emails(OUT_PATH)             # emails-only (kept for safety)
+        seen_pairs = _load_existing_pairs(OUT_PATH)              # (username, email)
 
         found_this_run = 0
         users_with_hits = 0
@@ -159,67 +175,108 @@ def run_scrape(params: ScrapeParams) -> dict:
                 break
             USERS_VISITED.inc()
             per_user_written = 0
+            per_user_capped = False
 
             prof_emails, gh_links_on_prof, web_links = scrape_hf_profile(user)
+
+            # HF profile
             for e in prof_emails:
-                if e in seen_emails:
+                if found_this_run >= params.email_limit or per_user_capped:
+                    break
+                el = e.strip().lower()
+                pair = (user, el)
+                if el in seen_emails or pair in seen_pairs:
                     EMAILS_DEDUP_SKIPPED.inc(); continue
-                append_jsonl(OUT_PATH, {"username": user, "email": e, "source": "huggingface-profile"})
+                append_jsonl(OUT_PATH, {"username": user, "email": el, "source": "huggingface-profile"})
                 EMAILS_FOUND.labels("huggingface-profile").inc()
                 EMAILS_WRITTEN.inc()
                 emails_by_source["huggingface-profile"] += 1
-                seen_emails.add(e); found_this_run += 1; per_user_written += 1
-                dom = e.split("@")[-1].lower(); domains_count[dom] = domains_count.get(dom, 0) + 1
-                if found_this_run >= params.email_limit: break
-            if found_this_run >= params.email_limit: break
+                seen_emails.add(el); seen_pairs.add(pair)
+                found_this_run += 1; per_user_written += 1
+                dom = el.split("@")[-1].lower(); domains_count[dom] = domains_count.get(dom, 0) + 1
+                if _PER_USER_MAX and per_user_written >= _PER_USER_MAX:
+                    per_user_capped = True
+
+            if found_this_run >= params.email_limit:
+                break
 
             gh_links_accum = list(gh_links_on_prof)
-            for slug in get_user_models(user, params.models_pages_per_user):
-                if found_this_run >= params.email_limit: break
-                m_emails, m_gh_links = scrape_hf_model_page(slug)
-                for e in m_emails:
-                    if e in seen_emails:
-                        EMAILS_DEDUP_SKIPPED.inc(); continue
-                    append_jsonl(OUT_PATH, {"username": user, "email": e, "source": "huggingface-model"})
-                    EMAILS_FOUND.labels("huggingface-model").inc()
-                    EMAILS_WRITTEN.inc()
-                    emails_by_source["huggingface-model"] += 1
-                    seen_emails.add(e); found_this_run += 1; per_user_written += 1
-                    dom = e.split("@")[-1].lower(); domains_count[dom] = domains_count.get(dom, 0) + 1
-                    if found_this_run >= params.email_limit: break
-                for g in m_gh_links:
-                    if g not in gh_links_accum:
-                        gh_links_accum.append(g)
 
-            if found_this_run >= params.email_limit: break
+            # HF models
+            if not per_user_capped:
+                for slug in get_user_models(user, params.models_pages_per_user):
+                    if found_this_run >= params.email_limit or per_user_capped:
+                        break
+                    m_emails, m_gh_links = scrape_hf_model_page(slug)
+                    for e in m_emails:
+                        if found_this_run >= params.email_limit or per_user_capped:
+                            break
+                        el = e.strip().lower()
+                        pair = (user, el)
+                        if el in seen_emails or pair in seen_pairs:
+                            EMAILS_DEDUP_SKIPPED.inc(); continue
+                        append_jsonl(OUT_PATH, {"username": user, "email": el, "source": "huggingface-model"})
+                        EMAILS_FOUND.labels("huggingface-model").inc()
+                        EMAILS_WRITTEN.inc()
+                        emails_by_source["huggingface-model"] += 1
+                        seen_emails.add(el); seen_pairs.add(pair)
+                        found_this_run += 1; per_user_written += 1
+                        dom = el.split("@")[-1].lower(); domains_count[dom] = domains_count.get(dom, 0) + 1
+                        if _PER_USER_MAX and per_user_written >= _PER_USER_MAX:
+                            per_user_capped = True
+                    for g in m_gh_links:
+                        if g not in gh_links_accum:
+                            gh_links_accum.append(g)
 
-            for link in web_links:
-                if found_this_run >= params.email_limit: break
-                for e in scrape_website_for_emails(link):
-                    if e in seen_emails:
-                        EMAILS_DEDUP_SKIPPED.inc(); continue
-                    append_jsonl(OUT_PATH, {"username": user, "email": e, "source": "website"})
-                    EMAILS_FOUND.labels("website").inc()
-                    EMAILS_WRITTEN.inc()
-                    emails_by_source["website"] += 1
-                    seen_emails.add(e); found_this_run += 1; per_user_written += 1
-                    dom = e.split("@")[-1].lower(); domains_count[dom] = domains_count.get(dom, 0) + 1
-                    if found_this_run >= params.email_limit: break
+            if found_this_run >= params.email_limit:
+                break
 
-            if found_this_run >= params.email_limit: break
+            # Websites
+            if not per_user_capped:
+                for link in web_links:
+                    if found_this_run >= params.email_limit or per_user_capped:
+                        break
+                    for e in scrape_website_for_emails(link):
+                        if found_this_run >= params.email_limit or per_user_capped:
+                            break
+                        el = e.strip().lower()
+                        pair = (user, el)
+                        if el in seen_emails or pair in seen_pairs:
+                            EMAILS_DEDUP_SKIPPED.inc(); continue
+                        append_jsonl(OUT_PATH, {"username": user, "email": el, "source": "website"})
+                        EMAILS_FOUND.labels("website").inc()
+                        EMAILS_WRITTEN.inc()
+                        emails_by_source["website"] += 1
+                        seen_emails.add(el); seen_pairs.add(pair)
+                        found_this_run += 1; per_user_written += 1
+                        dom = el.split("@")[-1].lower(); domains_count[dom] = domains_count.get(dom, 0) + 1
+                        if _PER_USER_MAX and per_user_written >= _PER_USER_MAX:
+                            per_user_capped = True
 
-            for gh in gh_links_accum:
-                if found_this_run >= params.email_limit: break
-                for e in get_github_emails(gh):
-                    if e in seen_emails:
-                        EMAILS_DEDUP_SKIPPED.inc(); continue
-                    append_jsonl(OUT_PATH, {"username": user, "email": e, "source": "github"})
-                    EMAILS_FOUND.labels("github").inc()
-                    EMAILS_WRITTEN.inc()
-                    emails_by_source["github"] += 1
-                    seen_emails.add(e); found_this_run += 1; per_user_written += 1
-                    dom = e.split("@")[-1].lower(); domains_count[dom] = domains_count.get(dom, 0) + 1
-                    if found_this_run >= params.email_limit: break
+            if found_this_run >= params.email_limit:
+                break
+
+            # GitHub
+            if not per_user_capped:
+                for gh in gh_links_accum:
+                    if found_this_run >= params.email_limit or per_user_capped:
+                        break
+                    for e in get_github_emails(gh):
+                        if found_this_run >= params.email_limit or per_user_capped:
+                            break
+                        el = e.strip().lower()
+                        pair = (user, el)
+                        if el in seen_emails or pair in seen_pairs:
+                            EMAILS_DEDUP_SKIPPED.inc(); continue
+                        append_jsonl(OUT_PATH, {"username": user, "email": el, "source": "github"})
+                        EMAILS_FOUND.labels("github").inc()
+                        EMAILS_WRITTEN.inc()
+                        emails_by_source["github"] += 1
+                        seen_emails.add(el); seen_pairs.add(pair)
+                        found_this_run += 1; per_user_written += 1
+                        dom = el.split("@")[-1].lower(); domains_count[dom] = domains_count.get(dom, 0) + 1
+                        if _PER_USER_MAX and per_user_written >= _PER_USER_MAX:
+                            per_user_capped = True
 
             if per_user_written > 0:
                 users_with_hits += 1
@@ -240,10 +297,11 @@ def run_scrape(params: ScrapeParams) -> dict:
             "unique_domains": len(domains_count),
             "top_domains": sorted(domains_count.items(), key=lambda x: x[1], reverse=True)[:10],
             "out_path": os.path.abspath(OUT_PATH),
+            "per_user_max": _PER_USER_MAX,
         }
         _last_kpi = kpi_snapshot
         with open("kpi_latest.json", "w", encoding="utf-8") as f:
-            import json; json.dump(kpi_snapshot, f, ensure_ascii=False, indent=2)
+            json.dump(kpi_snapshot, f, ensure_ascii=False, indent=2)
         return kpi_snapshot
     finally:
         _running = False

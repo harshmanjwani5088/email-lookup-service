@@ -1,55 +1,55 @@
 {
-  "run_seconds": 662.14,
-  "users_discovered": 414,
-  "users_with_hits": 37,
-  "hit_rate_percent": 8.94,
+  "run_seconds": 1185.84,
+  "users_discovered": 411,
+  "users_with_hits": 32,
+  "hit_rate_percent": 7.79,
   "new_emails_written": 200,
   "emails_by_source": {
-    "huggingface-profile": 3,
+    "huggingface-profile": 2,
     "huggingface-model": 0,
-    "website": 75,
-    "github": 122
+    "website": 29,
+    "github": 169
   },
-  "unique_domains": 82,
+  "unique_domains": 49,
   "top_domains": [
     [
       "gmail.com",
-      71
+      111
     ],
     [
-      "2x.jpg",
-      21
+      "microsoft.com",
+      13
     ],
     [
-      "stability.ai",
+      "outlook.com",
       7
     ],
     [
-      "allenai.org",
+      "systrangroup.com",
+      7
+    ],
+    [
+      "ibm.com",
       6
     ],
     [
-      "2x.png",
-      6
-    ],
-    [
-      "hotmail.com",
-      5
-    ],
-    [
-      "ultravox.ai",
+      "intel.com",
       4
     ],
     [
-      "3x.png",
-      4
+      "qq.com",
+      3
     ],
     [
-      "huggingface.co",
+      "icloud.com",
+      3
+    ],
+    [
+      "163.com",
       2
     ],
     [
-      "medium.com",
+      "hotmail.com",
       2
     ]
   ],
